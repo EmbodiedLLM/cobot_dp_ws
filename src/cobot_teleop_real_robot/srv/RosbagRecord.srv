@@ -1,0 +1,8 @@
+# Request
+string command  # 'start' or 'stop' or 'drop'
+string session_name
+string bag_save_full_path
+---
+# Response
+bool success
+string message

@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- 启动rviz并加载指定配置文件 -->
+    <node pkg="rviz" type="rviz" name="rviz" 
+          args="-d $(find cobot_teleop_real_robot)/rviz/cobot_recorder.rviz"/>
+</launch>
