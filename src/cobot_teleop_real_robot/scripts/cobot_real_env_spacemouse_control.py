@@ -16,6 +16,7 @@ import uuid
 random_id_str = str(uuid.uuid4())[:8]
 
 def main():
+    verbose = False
     # Initialize ROS node first
     rospy.init_node('cobot_spacemouse_control', anonymous=True)
     rospy.loginfo("正在初始化...")
@@ -58,6 +59,7 @@ def main():
     iter_idx = 0
     env.update_current_pose()
     target_pose = env.current_pose
+    env.gripper_state = env.gripper_real_state
     with SharedMemoryManager() as shm_manager:
         with KeystrokeCounter() as key_counter, \
             Spacemouse(shm_manager=shm_manager, deadzone=0.3) as sm:
@@ -75,10 +77,11 @@ def main():
                 for key_stroke in press_events:
                     # 夹爪
                     if key_stroke == Key.space:
-                        print("夹爪开关...")
                         if env.gripper_state:
+                            print("关夹爪...")
                             env.gripper_close()
                         else:
+                            print("开夹爪...")
                             env.gripper_open()
                     if key_stroke == Key.esc:
                         rospy.loginfo("程序退出...")
@@ -105,6 +108,7 @@ def main():
                         break
                     elif key_stroke == KeyCode(char='c'):
                         if not env.is_recording:    
+
                             # Start recording
                             env.start_episode(
                                 task_name=task_name,
@@ -118,7 +122,8 @@ def main():
                         if env.is_recording:
                             # Stop recording
                             env.end_episode()
-                            key_counter.clear()
+                        key_counter.clear()
+                        stage = 0
                         print('Stopped.')
                     elif key_stroke == Key.backspace:
                         if env.is_recording:
@@ -128,6 +133,9 @@ def main():
                             key_counter.clear()
                         else:
                             print('Not recording!')
+                stage = key_counter[Key.tab]
+                state_str = "Recording" if env.is_recording else "IDLE"
+                rospy.loginfo(f"[{state_str}]: episode_id: {env.episode_id}, stage: {stage}")
 
                 if not sm.is_button_pressed(0):
                     drot_xyz[:] = 0
@@ -141,7 +149,6 @@ def main():
                 target_pose[:3] += dpos
                 target_pose[3:] = (drot * st.Rotation.from_rotvec(
                     target_pose[3:])).as_rotvec()
-                rospy.loginfo(f"Target pose: {target_pose}")
                 env.exec_actions(
                     actions=[target_pose], 
                     timestamps=[t_command_target-time.monotonic()+time.time()]
@@ -149,7 +156,9 @@ def main():
                 iter_idx += 1
                 rate.sleep()
                 time_end = time.time()
-                rospy.loginfo(f"cycle time: {time_end - time_start}, actual frequency: {1/(time_end - time_start)}")
-                rospy.loginfo(f"t_cycle_end: {t_cycle_end}, t_command_target: {t_command_target}")
+                if verbose:
+                    rospy.loginfo(f"Target pose: {target_pose}")
+                    rospy.loginfo(f"cycle time: {time_end - time_start}, actual frequency: {1/(time_end - time_start)}")
+                    rospy.loginfo(f"t_cycle_end: {t_cycle_end}, t_command_target: {t_command_target}")
 if __name__ == '__main__':
     main()

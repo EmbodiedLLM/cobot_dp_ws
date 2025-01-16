@@ -7,9 +7,11 @@ from gymnasium import spaces
 import rospy
 import numpy as np
 from std_msgs.msg import String
+from sensor_msgs.msg import CompressedImage
 from rm_msgs.msg import CartePos
-from geometry_msgs.msg import Pose
-from dh_gripper_msgs.msg import GripperCtrl
+from geometry_msgs.msg import PoseStamped, Pose
+from cobot_teleop_real_robot.msg import PoseStampedWithGripper
+from dh_gripper_msgs.msg import GripperCtrl, GripperState
 from sensor_msgs.msg import Image, JointState
 import message_filters
 from cv_bridge import CvBridge
@@ -27,14 +29,15 @@ class CobotEnv(gym.Env):
         # Define topic names
         self.TOPICS = {
             'joint_states': '/joint_states',
-            'main_depth': '/main_cam/aligned_depth_to_color/image_raw',
-            'hand_depth': '/hand_cam/aligned_depth_to_color/image_raw',
-            'main_color': '/main_cam/color/image_raw',
-            'hand_color': '/hand_cam/color/image_raw',
+            'main_depth': '/main_cam/aligned_depth_to_color/image_raw/compressed',
+            'hand_depth': '/hand_cam/aligned_depth_to_color/image_raw/compressed',
+            'main_color': '/main_cam/color/image_raw/compressed',
+            'hand_color': '/hand_cam/color/image_raw/compressed',
             'gripper_states': '/gripper/states'
         }
 
-        self.gripper_state = False  # Add gripper state tracking
+        self.gripper_state = None # 1 or 0 -> Open or Close
+        self.gripper_real_state = None
         # Initialize state variables
         self.current_pose = np.zeros(6, dtype=np.float32)
         self.pose_msg_queue = deque(maxlen=256)
@@ -65,20 +68,26 @@ class CobotEnv(gym.Env):
         self.pose_pub = rospy.Publisher('/rm_driver/MoveP_Fd_Cmd', CartePos, queue_size=10)
         self.gripper_pub = rospy.Publisher('/gripper/ctrl', GripperCtrl, queue_size=10)
         self.pose_sub = rospy.Subscriber('/rm_driver/Pose_State', Pose, self.pose_callback)
+        self.gripper_sub = rospy.Subscriber('/gripper/states', GripperState, self.gripper_callback)
         self.movej_pub = rospy.Publisher('/rm_driver/MoveJ_Cmd', MoveJ, queue_size=10)
         self.command_publisher = rospy.Publisher('/cobot_interpolation_controller/command', String, queue_size=10)
+
+        self.cobot_main_cam_pub = rospy.Publisher('/cobot/obs/main_cam/compressed', CompressedImage, queue_size=10)
+        self.cobot_main_cam_depth_pub = rospy.Publisher('/cobot/obs/main_cam_depth/compressed', CompressedImage, queue_size=10)
+        self.cobot_hand_cam_pub = rospy.Publisher('/cobot/obs/hand_cam/compressed', CompressedImage, queue_size=10)
+        self.cobot_hand_cam_depth_pub = rospy.Publisher('/cobot/obs/hand_cam_depth/compressed', CompressedImage, queue_size=10)
+        self.cobot_pose_pub = rospy.Publisher('/cobot/obs/pose', PoseStamped, queue_size=10)
+        self.cobot_joint_pub = rospy.Publisher('/cobot/obs/joint_states', JointState, queue_size=10)    
+
+        self.cobot_action_pub = rospy.Publisher('/cobot/actions', PoseStampedWithGripper, queue_size=10)
         
         # Initialize ROS subscribers with message filters
         self.bridge = CvBridge()
         self.joint_sub = message_filters.Subscriber(self.TOPICS['joint_states'], JointState)
-        self.main_depth_sub = message_filters.Subscriber(self.TOPICS['main_depth'], Image)
-        self.hand_depth_sub = message_filters.Subscriber(self.TOPICS['hand_depth'], Image)
-        self.main_color_sub = message_filters.Subscriber(self.TOPICS['main_color'], Image)
-        self.hand_color_sub = message_filters.Subscriber(self.TOPICS['hand_color'], Image)
-
-        self.max_pos_speed = 0.1 # 0.25
-        self.max_rot_speed = 0.1 # 0.6
-        
+        self.main_depth_sub = message_filters.Subscriber(self.TOPICS['main_depth'], CompressedImage)
+        self.hand_depth_sub = message_filters.Subscriber(self.TOPICS['hand_depth'], CompressedImage)
+        self.main_color_sub = message_filters.Subscriber(self.TOPICS['main_color'], CompressedImage)
+        self.hand_color_sub = message_filters.Subscriber(self.TOPICS['hand_color'], CompressedImage)
         # Time synchronizer
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.main_depth_sub, self.hand_depth_sub,
@@ -105,6 +114,8 @@ class CobotEnv(gym.Env):
         rospy.wait_for_service('cobot_rosbag_recorder')
         rospy.loginfo("Rosbag recorder service found!")
         self.rosbag_service = rospy.ServiceProxy('cobot_rosbag_recorder', RosbagRecord)
+        self.max_pos_speed = 0.1
+        self.max_rot_speed = 0.6
 
     
     def start_episode(self, episode_start_time, task_name):
@@ -133,6 +144,11 @@ class CobotEnv(gym.Env):
         
     def pose_callback(self, msg):
         self.pose_msg_queue.append(msg)
+    
+    def gripper_callback(self, msg):
+        self.gripper_real_state = msg.position > 0.0
+        if self.gripper_state is None:
+            self.gripper_state = self.gripper_real_state
     
     def toggle_gripper(self):
         self.gripper_state = not self.gripper_state
@@ -177,6 +193,12 @@ class CobotEnv(gym.Env):
         try:
             self.all_sync_msg_queue.append((main_depth_msg, hand_depth_msg, 
                      main_color_msg, hand_color_msg, joint_msg))
+            timestamp = joint_msg.header.stamp
+            self._publish_pose_for_record(timestamp=timestamp)
+            self._publish_obs_for_record(timestamp=timestamp,
+                                         main_color_msg=main_color_msg, hand_color_msg=hand_color_msg, 
+                                         main_depth_msg=main_depth_msg, hand_depth_msg=hand_depth_msg, 
+                                         joint_msg=joint_msg)
         except Exception as e:
             rospy.logerr(f"Error in sync_callback: {str(e)}")
 
@@ -185,25 +207,18 @@ class CobotEnv(gym.Env):
         # Move to home position first
         self.move_to_home()
         return self.get_observation()
-
-
-    def step(self, target_pose):
-        """Execute action and return new state
-        
-        Args:
-            target_pose: Pose object with target position
-        """
-        # Execute movement
-        if target_pose is not None:
-            self._move_robot(target_pose)
-        
-        # Get observation and calculate reward
-        observation = self.get_observation()
-        reward = self._calculate_reward()
-        done = False
-        info = {}
-
-        return observation, reward, done, info
+    
+    def _publish_obs_for_record(self, timestamp ,main_color_msg, hand_color_msg, main_depth_msg, hand_depth_msg, joint_msg):
+        main_color_msg.header.stamp = timestamp
+        main_depth_msg.header.stamp = timestamp
+        hand_color_msg.header.stamp = timestamp
+        hand_depth_msg.header.stamp = timestamp
+        joint_msg.header.stamp = timestamp
+        self.cobot_main_cam_pub.publish(main_color_msg)
+        self.cobot_main_cam_depth_pub.publish(main_depth_msg)
+        self.cobot_hand_cam_pub.publish(hand_color_msg)
+        self.cobot_hand_cam_depth_pub.publish(hand_depth_msg)
+        self.cobot_joint_pub.publish(joint_msg)
     
     def get_observation(self):
         """Return the current observation"""
@@ -220,10 +235,10 @@ class CobotEnv(gym.Env):
         self.current_observation = {
             'timestamp': np.array([joint_msg.header.stamp.to_sec()], dtype=np.float32),
             'joint_positions': np.array(list(joint_msg.position), dtype=np.float32),
-            'main_color': self.bridge.imgmsg_to_cv2(main_color_msg, "bgr8"),
-            'main_depth': self.bridge.imgmsg_to_cv2(main_depth_msg, "passthrough"), 
-            'hand_color': self.bridge.imgmsg_to_cv2(hand_color_msg, "bgr8"),
-            'hand_depth': self.bridge.imgmsg_to_cv2(hand_depth_msg, "passthrough"),
+            'main_color': self.bridge.compressed_imgmsg_to_cv2(main_color_msg, "bgr8"),
+            'main_depth': self.bridge.compressed_imgmsg_to_cv2(main_depth_msg, "passthrough"), 
+            'hand_color': self.bridge.compressed_imgmsg_to_cv2(hand_color_msg, "bgr8"),
+            'hand_depth': self.bridge.compressed_imgmsg_to_cv2(hand_depth_msg, "passthrough"),
             'eef_pose': self.current_pose,
         }
         return self.current_observation
@@ -231,7 +246,8 @@ class CobotEnv(gym.Env):
 
     def exec_actions(self, 
             actions: np.ndarray, 
-            timestamps: np.ndarray
+            timestamps: np.ndarray,
+            stage: int = 0
         ):
         # assert self.is_ready
         if not isinstance(actions, np.ndarray):
@@ -250,11 +266,43 @@ class CobotEnv(gym.Env):
             message = {
                 'cmd': "SCHEDULE_WAYPOINT",
                 'target_pose': new_actions[i].tolist(),
-                'target_time': new_timestamps[i]
+                'target_time': new_timestamps[i],
             }
             msg = String()
             msg.data = json.dumps(message)
             self.command_publisher.publish(msg)
+            self._publish_action_for_record(new_actions[i], stage)
+    
+    def _publish_action_for_record(self, new_pose, stage):
+        pose_msg = PoseStampedWithGripper()
+        new_pose_rot = st.Rotation.from_rotvec(new_pose[3:]).as_quat().tolist()
+        new_pose_array = np.concatenate([new_pose[:3], new_pose_rot])
+        pose_msg.pose.position.x = new_pose_array[0]
+        pose_msg.pose.position.y = new_pose_array[1]
+        pose_msg.pose.position.z = new_pose_array[2]
+        pose_msg.pose.orientation.x = new_pose_array[3]
+        pose_msg.pose.orientation.y = new_pose_array[4]
+        pose_msg.pose.orientation.z = new_pose_array[5]
+        pose_msg.pose.orientation.w = new_pose_array[6]
+        pose_msg.gripper_state = self.gripper_state
+        pose_msg.stage = stage
+        current_timestamp = rospy.Time.now()
+        pose_msg.header.stamp = current_timestamp
+        self.cobot_action_pub.publish(pose_msg)
+
+    def _publish_pose_for_record(self, timestamp):
+        current_timestamp = timestamp
+        current_pose_msg = self.pose_msg_queue.pop()
+        new_current_pose_msg = PoseStamped()
+        new_current_pose_msg.pose.position.x = current_pose_msg.position.x
+        new_current_pose_msg.pose.position.y = current_pose_msg.position.y
+        new_current_pose_msg.pose.position.z = current_pose_msg.position.z
+        new_current_pose_msg.pose.orientation.x = current_pose_msg.orientation.x
+        new_current_pose_msg.pose.orientation.y = current_pose_msg.orientation.y
+        new_current_pose_msg.pose.orientation.z = current_pose_msg.orientation.z
+        new_current_pose_msg.pose.orientation.w = current_pose_msg.orientation.w
+        new_current_pose_msg.header.stamp = current_timestamp
+        self.cobot_pose_pub.publish(new_current_pose_msg)
 
     def _control_gripper(self, open_gripper):
         """Control gripper state"""

@@ -55,8 +55,7 @@ class CobotInterpolationControllerNode():
         self.pose_sub = rospy.Subscriber('/rm_driver/Pose_State', Pose, self.pose_callback, queue_size=10)
         self.pose_pub = rospy.Publisher('/rm_driver/MoveP_Fd_Cmd', CartePos, queue_size=10)
         self.movej_pub = rospy.Publisher('/rm_driver/MoveJ_Cmd', MoveJ, queue_size=10)
-
-        self.max_pos_speed = 0.25 # 0.25
+        self.max_pos_speed = 0.1 
         self.max_rot_speed = 0.6 # 0.6
         self.verbose = verbose
         self.frequency = 50 # Hz

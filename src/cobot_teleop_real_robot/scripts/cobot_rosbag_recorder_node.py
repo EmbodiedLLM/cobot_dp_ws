@@ -38,18 +38,29 @@ def start_rosbag_record(session_name="temp_session", bag_save_full_path=None):
 
     print("\n=== Starting ROSBag Recording ===")
     
-    # Topics to record
-    throttled_topics = [
-        "/main_cam/color/image_raw/compressed_throttle",
-        "/main_cam/aligned_depth_to_color/image_raw/compressed_throttle", 
-        "/hand_cam/color/image_raw/compressed_throttle",
-        "/hand_cam/aligned_depth_to_color/image_raw/compressed_throttle",
-        "/gripper/states",
-        "/rm_driver/Pose_State",
-        "/joint_states"
+    # # Topics to record
+    # throttled_topics = [
+    #     "/main_cam/color/image_raw/compressed_throttle",
+    #     "/main_cam/aligned_depth_to_color/image_raw/compressed_throttle", 
+    #     "/hand_cam/color/image_raw/compressed_throttle",
+    #     "/hand_cam/aligned_depth_to_color/image_raw/compressed_throttle",
+    #     "/cobot/pose", # 30Hz
+    #     "/gripper/states",
+    #     # "/rm_driver/Pose_State", # raw pose, 50Hz
+    #     "/joint_states",
+    #     "/cobot/actions", # 10Hz
+    # ]
+    to_record_topics = [
+        "/cobot/obs/main_cam/compressed",
+        "/cobot/obs/main_cam_depth/compressed",
+        "/cobot/obs/hand_cam/compressed",
+        "/cobot/obs/hand_cam_depth/compressed",
+        "/cobot/obs/pose",
+        "/cobot/obs/joint_states",
+        "/cobot/actions",
     ]
     # Use rosbag command line instead of Python interface
-    cmd = ["rosbag", "record", "-O", bag_save_full_path] + throttled_topics
+    cmd = ["rosbag", "record", "-O", bag_save_full_path] + to_record_topics
     process = subprocess.Popen(cmd)
     running_processes[session_name] = process
 
@@ -96,7 +107,7 @@ def main():
     """Main function to initialize and run the ROS node"""
     rospy.init_node('cobot_rosbag_recorder_node')
     # Start throttle nodes when the node initializes
-    start_throttle_nodes()
+    # start_throttle_nodes()
     service = rospy.Service('cobot_rosbag_recorder', RosbagRecord, handle_rosbag_service)
     rospy.loginfo("Rosbag record service started. Waiting for commands...")
     rospy.spin()
