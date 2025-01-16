@@ -92,6 +92,8 @@ def main():
                     if key_stroke == KeyCode(char='e'): #紧急停止
                         # 停止所有ROS Node
                         os.system("rosnode kill -a")
+                        # kill all python process
+                        os.system("killall python")
                         env.drop_episode()
                         stop = True
                         break
