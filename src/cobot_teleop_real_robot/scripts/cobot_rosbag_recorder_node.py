@@ -52,9 +52,9 @@ def start_rosbag_record(session_name="temp_session", bag_save_full_path=None):
     # ]
     to_record_topics = [
         "/cobot/obs/main_cam/compressed",
-        "/cobot/obs/main_cam_depth/compressed",
+        "/cobot/obs/main_cam_depth",
         "/cobot/obs/hand_cam/compressed",
-        "/cobot/obs/hand_cam_depth/compressed",
+        "/cobot/obs/hand_cam_depth",
         "/cobot/obs/pose",
         "/cobot/obs/joint_states",
         "/cobot/actions",

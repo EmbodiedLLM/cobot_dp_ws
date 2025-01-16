@@ -7,7 +7,7 @@ from gymnasium import spaces
 import rospy
 import numpy as np
 from std_msgs.msg import String
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
 from rm_msgs.msg import CartePos
 from geometry_msgs.msg import PoseStamped, Pose
 from cobot_teleop_real_robot.msg import PoseStampedWithGripper
@@ -29,8 +29,8 @@ class CobotEnv(gym.Env):
         # Define topic names
         self.TOPICS = {
             'joint_states': '/joint_states',
-            'main_depth': '/main_cam/aligned_depth_to_color/image_raw/compressed',
-            'hand_depth': '/hand_cam/aligned_depth_to_color/image_raw/compressed',
+            'main_depth': '/main_cam/aligned_depth_to_color/image_raw',
+            'hand_depth': '/hand_cam/aligned_depth_to_color/image_raw',
             'main_color': '/main_cam/color/image_raw/compressed',
             'hand_color': '/hand_cam/color/image_raw/compressed',
             'gripper_states': '/gripper/states'
@@ -73,9 +73,9 @@ class CobotEnv(gym.Env):
         self.command_publisher = rospy.Publisher('/cobot_interpolation_controller/command', String, queue_size=10)
 
         self.cobot_main_cam_pub = rospy.Publisher('/cobot/obs/main_cam/compressed', CompressedImage, queue_size=10)
-        self.cobot_main_cam_depth_pub = rospy.Publisher('/cobot/obs/main_cam_depth/compressed', CompressedImage, queue_size=10)
+        self.cobot_main_cam_depth_pub = rospy.Publisher('/cobot/obs/main_cam_depth', Image, queue_size=10)
         self.cobot_hand_cam_pub = rospy.Publisher('/cobot/obs/hand_cam/compressed', CompressedImage, queue_size=10)
-        self.cobot_hand_cam_depth_pub = rospy.Publisher('/cobot/obs/hand_cam_depth/compressed', CompressedImage, queue_size=10)
+        self.cobot_hand_cam_depth_pub = rospy.Publisher('/cobot/obs/hand_cam_depth', Image, queue_size=10)
         self.cobot_pose_pub = rospy.Publisher('/cobot/obs/pose', PoseStamped, queue_size=10)
         self.cobot_joint_pub = rospy.Publisher('/cobot/obs/joint_states', JointState, queue_size=10)    
 
@@ -84,8 +84,8 @@ class CobotEnv(gym.Env):
         # Initialize ROS subscribers with message filters
         self.bridge = CvBridge()
         self.joint_sub = message_filters.Subscriber(self.TOPICS['joint_states'], JointState)
-        self.main_depth_sub = message_filters.Subscriber(self.TOPICS['main_depth'], CompressedImage)
-        self.hand_depth_sub = message_filters.Subscriber(self.TOPICS['hand_depth'], CompressedImage)
+        self.main_depth_sub = message_filters.Subscriber(self.TOPICS['main_depth'], Image)
+        self.hand_depth_sub = message_filters.Subscriber(self.TOPICS['hand_depth'], Image)
         self.main_color_sub = message_filters.Subscriber(self.TOPICS['main_color'], CompressedImage)
         self.hand_color_sub = message_filters.Subscriber(self.TOPICS['hand_color'], CompressedImage)
         # Time synchronizer
