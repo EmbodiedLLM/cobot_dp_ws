@@ -64,7 +64,14 @@ class RosbagConverter:
         self.episode_id = 0
         self.episode_msgs = {}
         # self.all_episode_data = {}
-        self.episode_data = {}
+        self.episode_data = {
+            "agent_view_image": [],
+            "hand_view_image": [],
+            "robot_eef_pose": [],
+            "actions": [],
+            "action_2d": []
+        }
+
         self.all_bag_finished = False
 
 
@@ -76,20 +83,6 @@ class RosbagConverter:
         self.count += 1
         # 在这里处理同步后的消息
         rospy.loginfo(f"Received synchronized messages: {self.count}")
-        # if self.episode_id not in self.all_episode_data:
-        #     self.all_episode_data[self.episode_id] = {
-        #         "agent_view_image": [],
-        #         "hand_view_image": [],
-        #         "robot_eef_pose": [],
-        #         "actions": []
-        #     }
-        self.episode_data = {
-            "agent_view_image": [],
-            "hand_view_image": [],
-            "robot_eef_pose": [],
-            "actions": []
-        }
-        
         # --- Get Observation ---
         # Convert images
         convert_func = (self.bridge.compressed_imgmsg_to_cv2 
@@ -117,15 +110,15 @@ class RosbagConverter:
             action_msg.pose.orientation.z, action_msg.pose.orientation.w
         ]).as_rotvec()
         actions_array[6] = float(action_msg.gripper_state)
+        action_2d = np.zeros(2, dtype=np.float32)
+        action_2d[0] = actions_array[0]
+        action_2d[1] = actions_array[1]
         # --- End of Get Action ---
-        assert isinstance(main_cam_cv2, np.ndarray)
-        assert isinstance(hand_cam_cv2, np.ndarray)
-        assert isinstance(pose_array, np.ndarray)
-        assert isinstance(actions_array, np.ndarray)
         self.episode_data["agent_view_image"].append(main_cam_cv2)
         self.episode_data["hand_view_image"].append(hand_cam_cv2)
         self.episode_data["robot_eef_pose"].append(pose_array)
         self.episode_data["actions"].append(actions_array)
+        self.episode_data["action_2d"].append(action_2d)
     def run(self):
         rospy.spin()
         
@@ -145,7 +138,7 @@ def main():
         rospy.loginfo(f"Playing bag file: {bag_file}")
 
         # Start rosbag play in a separate process
-        play_command = f"rosbag play --clock {bag_file} > /dev/null 2>&1"
+        play_command = f"rosbag play --clock {bag_file} -r 2.5 > /dev/null 2>&1"
         process = subprocess.Popen(play_command, shell=True)
 
         # Wait for the process to complete
@@ -157,13 +150,16 @@ def main():
         converter.episode_data = {
             key: np.array(value) for key, value in converter.episode_data.items()
         }
+        for key, value in converter.episode_data.items():
+            rospy.loginfo(f"{key}: {value.shape}")
         # svae to replay buffer
         converter.replay_buffer.add_episode(converter.episode_data, compressors='disk')
         converter.episode_data ={
             "agent_view_image": [],
             "hand_view_image": [],
             "robot_eef_pose": [],
-            "actions": []
+            "actions": [],
+            "action_2d": []
         }
         import gc
         gc.collect()
