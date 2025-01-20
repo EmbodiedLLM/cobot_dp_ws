@@ -23,9 +23,9 @@ from cobot_teleop_real_robot.srv import RosbagRecord
 
 
 class CobotEnv(gym.Env):
-    def __init__(self, node_name=None, rosbag_save_root_dir=None):
+    def __init__(self, node_name=None, rosbag_save_root_dir=None, is_eval=False):
         super(CobotEnv, self).__init__()
-        
+        self.is_eval = is_eval
         # Define topic names
         self.TOPICS = {
             'joint_states': '/joint_states',
@@ -88,15 +88,23 @@ class CobotEnv(gym.Env):
         self.hand_depth_sub = message_filters.Subscriber(self.TOPICS['hand_depth'], Image)
         self.main_color_sub = message_filters.Subscriber(self.TOPICS['main_color'], CompressedImage)
         self.hand_color_sub = message_filters.Subscriber(self.TOPICS['hand_color'], CompressedImage)
-        # Time synchronizer
-        self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.main_depth_sub, self.hand_depth_sub,
-             self.main_color_sub, self.hand_color_sub,
-             self.joint_sub],
-            queue_size=10,
-            slop=0.1
-        )
-        self.ts.registerCallback(self.sync_callback)
+        if not self.is_eval:
+            # Time synchronizer
+            self.ts = message_filters.ApproximateTimeSynchronizer(
+                [self.main_depth_sub, self.hand_depth_sub,
+                self.main_color_sub, self.hand_color_sub,
+                self.joint_sub],
+                queue_size=10,
+                slop=0.1
+            )
+            self.ts.registerCallback(self.sync_callback)
+        else:
+            self.ts = message_filters.ApproximateTimeSynchronizer(
+                [self.main_color_sub, self.hand_color_sub],
+                queue_size=10,
+                slop=0.2
+            )
+            self.ts.registerCallback(self.eval_callback)
 
         # Add home position definition
         self.home_joints = [-0.495929, -0.191444, -1.430638, 0.002077, -1.499967, 0.019300]
@@ -116,6 +124,7 @@ class CobotEnv(gym.Env):
         self.rosbag_service = rospy.ServiceProxy('cobot_rosbag_recorder', RosbagRecord)
         self.max_pos_speed = 0.1
         self.max_rot_speed = 0.6
+        self.obs_queue = deque(maxlen=2)
 
     
     def start_episode(self, episode_start_time, task_name):
@@ -132,6 +141,8 @@ class CobotEnv(gym.Env):
     def end_episode(self):
         self.stop_rosbag_record()
         self.is_recording = False
+        # 关闭node
+        rospy.signal_shutdown("End of episode")
     
     def drop_episode(self):
         if self.is_recording:
@@ -175,7 +186,7 @@ class CobotEnv(gym.Env):
 
     def update_current_pose(self):
         try:
-            self.pose_msg = self.pose_msg_queue.pop()
+            self.pose_msg = self.pose_msg_queue[-1]
         except IndexError:
             self.pose_msg = None
             rospy.logerr("[CobotEnv.update_current_pose] pose_msg_queue is empty!")
@@ -186,6 +197,8 @@ class CobotEnv(gym.Env):
         pose_rot_vec = st.Rotation.from_quat(pose_array[3:]).as_rotvec()
         self.current_pose = np.concatenate([pose_array[:3], pose_rot_vec])
 
+    def eval_callback(self, main_color_msg, hand_color_msg):
+        self.all_sync_msg_queue.append((main_color_msg, hand_color_msg))
 
     def sync_callback(self, main_depth_msg, hand_depth_msg, 
                      main_color_msg, hand_color_msg, joint_msg):
@@ -202,11 +215,134 @@ class CobotEnv(gym.Env):
         except Exception as e:
             rospy.logerr(f"Error in sync_callback: {str(e)}")
 
-    def reset(self):
-        """Reset the environment and return initial observation"""
-        # Move to home position first
-        self.move_to_home()
-        return self.get_observation()
+    def get_dp_obs_dict(self, device=None, target_size=(320, 240)):
+        """
+        Get observation in diffusion policy format. Only handles tensor conversion and formatting.
+        Args:
+            device (torch.device, optional): Device to put tensors on. Defaults to CUDA if available, CPU otherwise.
+            target_size (tuple, optional): Target size for resizing images. Defaults to (320, 240), format (W, H).
+            
+        Returns:
+            dict: Single observation dictionary containing:
+                - agent_view_image: (C,H,W) tensor of main camera image
+                - hand_view_image: (C,H,W) tensor of hand camera image
+                - robot_eef_pose: (D,) tensor of end effector pose
+        """
+        import torch
+        import cv2
+        import torchvision.transforms.functional as TF
+
+        if self.current_observation is None:
+            rospy.logerr("[CobotEnv.get_dp_obs_dict] current_observation is None!")
+            return None
+
+        # Set device
+        if device is None:
+            # device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+            device = torch.device('cpu')
+
+        # Resize images to target dimensions
+        main_color = cv2.resize(self.current_observation['main_color'], target_size)
+        hand_color = cv2.resize(self.current_observation['hand_color'], target_size)
+
+        # Convert to tensors
+        agent_view = TF.to_tensor(TF.to_pil_image(main_color)).unsqueeze(0).to(device)
+        hand_view = TF.to_tensor(TF.to_pil_image(hand_color)).unsqueeze(0).to(device)
+        eef_pose = torch.from_numpy(self.current_observation['eef_pose']).unsqueeze(0).to(device)
+
+        # Create observation dictionary for single timestep
+        single_obs = {
+            "agent_view_image": agent_view,
+            "hand_view_image": hand_view,
+            "robot_eef_pose": eef_pose
+        }
+
+        return single_obs
+
+    def reset(self, device=None, target_size=(320, 240)):
+        """
+        Wrapper for diffusion policy
+        Reset the environment and return initial observation in diffusion policy format
+        Args:
+            device (torch.device, optional): Device to put tensors on. Defaults to CUDA if available, CPU otherwise.
+            target_size (tuple, optional): Target size for resizing images. Defaults to (320, 240), format (W, H).
+            
+        Returns:
+            dict: Observation dictionary containing:
+                - agent_view_image: (B,T,C,H,W) tensor of main camera images
+                - hand_view_image: (B,T,C,H,W) tensor of hand camera images  
+                - robot_eef_pose: (B,T,D) tensor of end effector poses
+            where B=1 (batch), T=2 (time steps), C=3 (channels), H,W=target size, D=6 (pose dims)
+        """
+        import torch
+        from collections import deque
+        self.update_current_pose()
+        
+        # Get current observation
+        self.current_observation = self.get_observation()
+        if self.current_observation is None:
+            return None
+
+        # Get formatted observation
+        single_obs = self.get_dp_obs_dict(device=device, target_size=target_size)
+        if single_obs is None:
+            return None
+
+        # Initialize observation queue
+        if not hasattr(self, 'obs_queue'):
+            self.obs_queue = deque(maxlen=2)
+        
+        # Add two copies of initial observation
+        self.obs_queue.clear()
+        self.obs_queue.extend([single_obs, single_obs])
+
+        # Stack observations along time dimension
+        obs_dict = {
+            key: torch.stack([self.obs_queue[0][key], self.obs_queue[1][key]], dim=1)
+            for key in single_obs.keys()
+        }
+
+        return obs_dict
+
+    def get_obs(self, device=None, target_size=(320, 240)):
+        """Wrapper for diffusion policy inference.
+        
+        Returns:
+            dict: Observation dictionary containing:
+                - agent_view_image: (B,T,C,H,W) tensor of main camera images
+                - hand_view_image: (B,T,C,H,W) tensor of hand camera images  
+                - robot_eef_pose: (B,T,D) tensor of end effector poses
+            where B=1 (batch), T=2 (time steps), C=3 (channels), H,W=target size, D=6 (pose dims)
+        """
+        import torch
+        from collections import deque
+
+        # Get current observation
+        self.current_observation = self.get_observation()
+        if self.current_observation is None:
+            rospy.logerr("[CobotEnv.get_obs] current_observation is None!")
+            return None
+
+        # Get formatted observation
+        single_obs = self.get_dp_obs_dict(device=device, target_size=target_size)
+        if single_obs is None:
+            return None
+
+        # Initialize observation queue if not exists, or append new observation
+        if not hasattr(self, 'obs_queue'):
+            self.obs_queue = deque(maxlen=2)
+            self.obs_queue.extend([single_obs, single_obs])
+        else:
+            self.obs_queue.append(single_obs)
+
+        # Stack observations along time dimension
+        obs_dict = {
+            key: torch.stack([self.obs_queue[0][key], self.obs_queue[1][key]], dim=1)
+            for key in single_obs.keys()
+        }
+
+        return obs_dict
+
     
     def _publish_obs_for_record(self, timestamp ,main_color_msg, hand_color_msg, main_depth_msg, hand_depth_msg, joint_msg):
         main_color_msg.header.stamp = timestamp
@@ -223,26 +359,37 @@ class CobotEnv(gym.Env):
     def get_observation(self):
         """Return the current observation"""
         if len(self.all_sync_msg_queue) == 0:
+            rospy.loginfo("all_sync_msg_queue is empty!")
             return None
         try:
-            latest_sync_msg = self.all_sync_msg_queue.pop()
+            # latest_sync_msg = self.all_sync_msg_queue.pop()
+            latest_sync_msg = self.all_sync_msg_queue[-1]
         except IndexError:
             latest_sync_msg = None
             rospy.logerr("[CobotEnv.get_observation] all_sync_msg_queue is empty!")
             return None
-        main_depth_msg, hand_depth_msg, main_color_msg, hand_color_msg, joint_msg = latest_sync_msg
-        self.update_current_pose()
-        self.current_observation = {
-            'timestamp': np.array([joint_msg.header.stamp.to_sec()], dtype=np.float32),
-            'joint_positions': np.array(list(joint_msg.position), dtype=np.float32),
-            'main_color': self.bridge.compressed_imgmsg_to_cv2(main_color_msg, "bgr8"),
-            'main_depth': self.bridge.compressed_imgmsg_to_cv2(main_depth_msg, "passthrough"), 
-            'hand_color': self.bridge.compressed_imgmsg_to_cv2(hand_color_msg, "bgr8"),
-            'hand_depth': self.bridge.compressed_imgmsg_to_cv2(hand_depth_msg, "passthrough"),
-            'eef_pose': self.current_pose,
-        }
+        if self.is_eval:
+            main_color_msg, hand_color_msg = latest_sync_msg
+            self.update_current_pose()
+            self.current_observation = {
+                'main_color': self.bridge.compressed_imgmsg_to_cv2(main_color_msg, "bgr8"),
+                'hand_color': self.bridge.compressed_imgmsg_to_cv2(hand_color_msg, "bgr8"),
+                'eef_pose': self.current_pose,
+                'timestamp': np.array([main_color_msg.header.stamp.to_sec()], dtype=np.float32),
+            }
+        else:
+            main_depth_msg, hand_depth_msg, main_color_msg, hand_color_msg, joint_msg = latest_sync_msg
+            self.update_current_pose()
+            self.current_observation = {
+                'timestamp': np.array([joint_msg.header.stamp.to_sec()], dtype=np.float32),
+                'joint_positions': np.array(list(joint_msg.position), dtype=np.float32),
+                'main_color': self.bridge.compressed_imgmsg_to_cv2(main_color_msg, "bgr8"),
+                'main_depth': self.bridge.compressed_imgmsg_to_cv2(main_depth_msg, "passthrough"), 
+                'hand_color': self.bridge.compressed_imgmsg_to_cv2(hand_color_msg, "bgr8"),
+                'hand_depth': self.bridge.compressed_imgmsg_to_cv2(hand_depth_msg, "passthrough"),
+                'eef_pose': self.current_pose,
+            }
         return self.current_observation
-    
 
     def exec_actions(self, 
             actions: np.ndarray, 
@@ -271,7 +418,8 @@ class CobotEnv(gym.Env):
             msg = String()
             msg.data = json.dumps(message)
             self.command_publisher.publish(msg)
-            self._publish_action_for_record(new_actions[i], stage)
+            if not self.is_eval:
+                self._publish_action_for_record(new_actions[i], stage)
     
     def _publish_action_for_record(self, new_pose, stage):
         pose_msg = PoseStampedWithGripper()
@@ -284,7 +432,7 @@ class CobotEnv(gym.Env):
         pose_msg.pose.orientation.y = new_pose_array[4]
         pose_msg.pose.orientation.z = new_pose_array[5]
         pose_msg.pose.orientation.w = new_pose_array[6]
-        pose_msg.gripper_state = self.gripper_state
+        pose_msg.gripper_state = bool(self.gripper_state)
         pose_msg.stage = stage
         current_timestamp = rospy.Time.now()
         pose_msg.header.stamp = current_timestamp
