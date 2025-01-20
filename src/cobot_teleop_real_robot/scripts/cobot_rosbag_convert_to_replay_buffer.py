@@ -9,7 +9,6 @@ from cobot_teleop_real_robot.msg import PoseStampedWithGripper
 import subprocess
 from replay_buffer import ReplayBuffer
 from glob import glob
-from natsort import natsorted
 from datetime import datetime
 import cv2
 from cv_bridge import CvBridge
@@ -18,17 +17,24 @@ import numpy as np
 
 
 class RosbagConverter:
-    def __init__(self, depth_compressed=True):
+    def __init__(self):
         self.count = 0
-        self.depth_compressed = depth_compressed
+        self.depth_compressed = rospy.get_param('~depth_compressed', False)
         
         # 获取参数
         self.bag_path = rospy.get_param('~bag_path', 
             '/home/ubuntu/cobot_push_cube/2025-01-16-jls/')
-        self.all_bag_files = natsorted(glob(os.path.join(self.bag_path, '*.bag')))
+        # self.all_bag_files = natsorted(glob(os.path.join(self.bag_path, '*.bag')))
+        self.all_bag_files = sorted(
+            glob(os.path.join(self.bag_path, '*.bag')),
+            key=lambda x: float(x.split('_')[-1].replace('.bag', ''))
+        )
         self.output_dir = rospy.get_param('~output_dir',
             '/home/ubuntu/cobot_push_cube/training_data')
-        output_full_path = os.path.join(self.output_dir, f'push_cube_2025-01-16-jls')
+        self.bag_play_rate = rospy.get_param('~bag_play_rate', 1)
+        output_name = os.path.basename(self.bag_path.rstrip('/'))
+        output_full_path = os.path.join(self.output_dir, output_name)
+        os.makedirs(os.path.join(self.output_dir, output_name), exist_ok=True)
 
         # 创建订阅者
         self.pose_sub = message_filters.Subscriber('/cobot/obs/pose', PoseStamped)
@@ -92,6 +98,8 @@ class RosbagConverter:
         main_depth_cv2 = convert_func(main_depth_msg)
         hand_depth_cv2 = convert_func(hand_depth_msg)
 
+        main_cam_resized = cv2.resize(main_cam_cv2, (340, 240))
+        hand_cam_resized = cv2.resize(hand_cam_cv2, (340, 240))
         # Process pose
         pose_array = np.zeros(6, dtype=np.float32)
         pose_msg = pose_msg
@@ -114,8 +122,8 @@ class RosbagConverter:
         action_2d[0] = actions_array[0]
         action_2d[1] = actions_array[1]
         # --- End of Get Action ---
-        self.episode_data["agent_view_image"].append(main_cam_cv2)
-        self.episode_data["hand_view_image"].append(hand_cam_cv2)
+        self.episode_data["agent_view_image"].append(main_cam_resized)
+        self.episode_data["hand_view_image"].append(hand_cam_resized)
         self.episode_data["robot_eef_pose"].append(pose_array)
         self.episode_data["actions"].append(actions_array)
         self.episode_data["action_2d"].append(action_2d)
@@ -138,7 +146,8 @@ def main():
         rospy.loginfo(f"Playing bag file: {bag_file}")
 
         # Start rosbag play in a separate process
-        play_command = f"rosbag play --clock {bag_file} -r 2.5 > /dev/null 2>&1"
+        # play_command = f"rosbag play --clock {bag_file} -r 2.5 > /dev/null 2>&1"
+        play_command = f"rosbag play --clock {bag_file} -r {converter.bag_play_rate}"
         process = subprocess.Popen(play_command, shell=True)
 
         # Wait for the process to complete
