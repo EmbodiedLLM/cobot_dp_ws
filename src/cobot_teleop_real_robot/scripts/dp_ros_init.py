@@ -45,12 +45,7 @@ def main():
     # os.system("sleep 1")
 
     # 启动机械臂
-    send_tmux_command(session_name, "roslaunch rm_driver rm_65_driver.launch", pane_index=2)
-    split_tmux_pane(session_name)
-    os.system("sleep 3")
-
-    # 启动夹爪
-    send_tmux_command(session_name, "roslaunch dh_gripper_driver dh_gripper.launch", pane_index=3)
+    send_tmux_command(session_name, "roslaunch rm_driver rm_75_driver.launch", pane_index=2)
     split_tmux_pane(session_name)
     os.system("sleep 3")
 
