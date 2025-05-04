@@ -142,7 +142,7 @@ class CobotEnv(gym.Env):
         self.stop_rosbag_record()
         self.is_recording = False
         # 关闭node
-        rospy.signal_shutdown("End of episode")
+        # rospy.signal_shutdown("End of episode")
     
     def drop_episode(self):
         if self.is_recording:
